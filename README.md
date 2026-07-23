@@ -20,7 +20,11 @@ slot in cleanly.
     stylesheet can target — while leaving colorful promo banners and sale badges alone.
   - Preserves the accents you rely on: prices, in-stock green, error red, and the signature
     **yellow "Add to Cart" / orange "Buy Now"** buttons stay recognizable.
-  - **Toggle any time** from the Tampermonkey menu or with **`Alt+Shift+D`**. Your choice persists.
+  - **Gentle photo dimming (v0.2.1).** Product photos have white backgrounds baked into the image
+    itself (no CSS background to darken), so small thumbnails get a mild brightness cut to take the
+    glare off — while promo banners and the main item-page photo stay full-brightness. It's on by
+    default and has its own toggle.
+  - **Toggle any time** from the Tampermonkey menu (dark mode also on **`Alt+Shift+D`**). Choices persist.
 
 ## Install
 
@@ -38,8 +42,9 @@ script when you push a new `@version`.
 
 - **Toggle dark mode:** Tampermonkey tray icon → **Amazon Tweaks** → *🌙 Dark mode: ON/OFF*, or press
   **`Alt+Shift+D`** on any Amazon page.
-- The setting is remembered across pages and sessions (stored via `GM_setValue`, or `localStorage`
-  as a fallback — UI preference only, nothing sensitive).
+- **Toggle photo dimming:** same menu → *🖼️ Dim product photos: ON/OFF*.
+- Both settings are remembered across pages and sessions (stored via `GM_setValue`, or `localStorage`
+  as a fallback — UI preferences only, nothing sensitive).
 
 ## Compatibility
 
@@ -71,7 +76,9 @@ flips that class). It's **two layers**:
       ("flavors") whose options ship differently (Prime vs. slow, add-on item, ships-from/sold-by).
       Spec is still being pinned down — see [`docs/BRIEF.md`](docs/BRIEF.md).
 - [x] Broad card coverage on modern React pages (Buy Again / Orders / cart) — via the v0.2 sweeper.
-- [ ] Dark-mode refinements: product image tiles, a text-contrast pass for any dark-on-dark stragglers.
+- [x] No white flash on lazily-loaded cards; gentle product-photo dimming (v0.2.1).
+- [ ] Dark-mode refinements: per-image white-matte detection (dim only true white backgrounds), a
+      text-contrast pass for any dark-on-dark stragglers.
 - [ ] Match more Amazon locales (`.co.uk`, `.ca`, `.de`, …).
 - [ ] Optional "follow system theme" mode.
 

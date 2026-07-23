@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Amazon Tweaks
 // @namespace    https://github.com/dataterminals/AmazonTweaks
-// @version      0.2.0
+// @version      0.2.1
 // @description  A small, growing collection of quality-of-life tweaks for amazon.com. Starts with a cohesive dark theme (toggleable) that covers modern React/hashed-class pages via a saturation-aware background sweeper. Purely cosmetic/read-only — it never clicks a buy control, submits a form, or makes a network request.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/AmazonTweaks
@@ -58,7 +58,9 @@
     typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
 
   const DEFAULTS = {
-    darkMode: true // the whole point of v0.1 — dark by default
+    darkMode: true,  // the whole point — dark by default
+    dimThumbs: true  // gently dim small product-photo thumbnails (they have white
+                     // backgrounds baked into the image; there's no CSS bg to darken)
   };
 
   function loadPrefs() {
@@ -394,6 +396,16 @@ html.amz-tw-dark [data-amztw="2"] {
   border-color: var(--ae-border) !important;
 }
 
+/* Gently dim small product-photo thumbnails the sweeper tags. Product photos
+   often have white backgrounds baked into the image (JPEG) — there's no CSS
+   background to darken, so a mild brightness cut takes the glare off without
+   making products unrecognizable. Gated on a root attribute so the menu toggle
+   flips it instantly; only applies to small thumbnails, never big promo banners
+   or the item-page main image. */
+html.amz-tw-dark[data-amztw-dimimg] img[data-amztw-img="1"] {
+  filter: brightness(0.83) contrast(1.03) !important;
+}
+
 /* ===== scrollbars ===== */
 html.amz-tw-dark ::-webkit-scrollbar { width: 12px; height: 12px; }
 html.amz-tw-dark ::-webkit-scrollbar-track { background: var(--ae-bg-2); }
@@ -416,9 +428,16 @@ html.amz-tw-dark ::-webkit-scrollbar-thumb:hover { background: #5b6773; }
     root.classList.toggle(DARK_CLASS, !!on);
   }
 
+  function applyDimImages(on) {
+    const root = document.documentElement;
+    if (!root) return;
+    root.toggleAttribute('data-amztw-dimimg', !!on);
+  }
+
   // Paint dark from the first frame — no white flash.
   injectStyle();
   applyDark(prefs.darkMode);
+  applyDimImages(prefs.dimThumbs);
 
   function setDark(on) {
     prefs.darkMode = !!on;
@@ -432,20 +451,39 @@ html.amz-tw-dark ::-webkit-scrollbar-thumb:hover { background: #5b6773; }
     setDark(!prefs.darkMode);
   }
 
+  function setDimImages(on) {
+    prefs.dimThumbs = !!on;
+    savePrefs(prefs);
+    applyDimImages(prefs.dimThumbs);
+    refreshMenu();
+  }
+
+  function toggleDimImages() {
+    setDimImages(!prefs.dimThumbs);
+  }
+
   // ---------------------------------------------------------------------------
   // Tampermonkey menu toggle + Alt+Shift+D shortcut.
   // ---------------------------------------------------------------------------
-  let menuId = null;
+  let menuIdDark = null;
+  let menuIdDim = null;
 
   function refreshMenu() {
     if (typeof GM_registerMenuCommand !== 'function') return;
-    if (menuId != null && typeof GM_unregisterMenuCommand === 'function') {
-      try { GM_unregisterMenuCommand(menuId); } catch (e) { /* ignore */ }
+    if (typeof GM_unregisterMenuCommand === 'function') {
+      if (menuIdDark != null) { try { GM_unregisterMenuCommand(menuIdDark); } catch (e) { /* ignore */ } }
+      if (menuIdDim != null) { try { GM_unregisterMenuCommand(menuIdDim); } catch (e) { /* ignore */ } }
     }
-    const label =
+    menuIdDark = GM_registerMenuCommand(
       (prefs.darkMode ? '🌙 Dark mode: ON' : '☀️ Dark mode: OFF') +
-      '  —  click to toggle (Alt+Shift+D)';
-    menuId = GM_registerMenuCommand(label, toggleDark);
+        '  —  click to toggle (Alt+Shift+D)',
+      toggleDark
+    );
+    menuIdDim = GM_registerMenuCommand(
+      (prefs.dimThumbs ? '🖼️ Dim product photos: ON' : '🖼️ Dim product photos: OFF') +
+        '  —  click to toggle',
+      toggleDimImages
+    );
   }
   refreshMenu();
 
@@ -491,8 +529,23 @@ html.amz-tw-dark ::-webkit-scrollbar-thumb:hover { background: #5b6773; }
   function luma(c) { return (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) / 255; }
   function chroma(c) { return Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b); }
 
+  // Small = a product thumbnail; big = a promo banner or the item-page main
+  // image (left at full brightness). Rendered size, not intrinsic.
+  const THUMB_MIN = 40;
+  const THUMB_MAX = 300;
+  function tagThumbIfSmall(img) {
+    if (img.hasAttribute('data-amztw-img')) return;
+    const r = img.getBoundingClientRect();
+    if (r.width >= THUMB_MIN && r.width <= THUMB_MAX &&
+        r.height >= THUMB_MIN && r.height <= THUMB_MAX) {
+      img.setAttribute('data-amztw-img', '1');
+    }
+  }
+
   function sweepEl(el) {
-    if (!el || el.nodeType !== 1 || el.hasAttribute('data-amztw')) return;
+    if (!el || el.nodeType !== 1) return;
+    if (el.tagName === 'IMG') { tagThumbIfSmall(el); return; } // thumbnails: tag for optional dimming
+    if (el.hasAttribute('data-amztw')) return;
     if (SWEEP_SKIP_TAGS.has(el.tagName)) return;
     const cls = typeof el.className === 'string' ? el.className : '';
     if (/a-button-(primary|cart|buynow|oyi)|accent/i.test(cls)) return; // keep CTA colours
@@ -528,8 +581,9 @@ html.amz-tw-dark ::-webkit-scrollbar-thumb:hover { background: #5b6773; }
   function scheduleSweep() {
     if (sweepScheduled) return;
     sweepScheduled = true;
-    if (window.requestIdleCallback) requestIdleCallback(flushSweep, { timeout: 400 });
-    else setTimeout(flushSweep, 150);
+    // rAF fires BEFORE the next paint, so freshly added nodes get darkened
+    // before the browser paints them white — no flash of unstyled background.
+    (window.requestAnimationFrame || function (cb) { return setTimeout(cb, 16); })(flushSweep);
   }
 
   let sweepObserver = null;
@@ -547,6 +601,18 @@ html.amz-tw-dark ::-webkit-scrollbar-thumb:hover { background: #5b6773; }
       if (sweepPending.length) scheduleSweep();
     });
     sweepObserver.observe(document.body, { childList: true, subtree: true });
+
+    // Straggler insurance: a few one-time re-sweeps catch slow post-load renders
+    // and any element that turned light via an in-place class/style change (which
+    // a childList observer can't see). Re-sweeps are cheap — already-tagged
+    // elements bail before the getComputedStyle call.
+    [400, 1200, 3000].forEach(function (t) {
+      setTimeout(function () {
+        if (!prefs.darkMode) return;
+        sweepPending.push(document.body);
+        scheduleSweep();
+      }, t);
+    });
   }
 
   if (prefs.darkMode) {
