@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Amazon Tweaks
 // @namespace    https://github.com/dataterminals/AmazonTweaks
-// @version      0.1.0
-// @description  A small, growing collection of quality-of-life tweaks for amazon.com. Starts with a cohesive dark theme (toggleable). Purely cosmetic/read-only — it never clicks a buy control, submits a form, or makes a network request.
+// @version      0.2.0
+// @description  A small, growing collection of quality-of-life tweaks for amazon.com. Starts with a cohesive dark theme (toggleable) that covers modern React/hashed-class pages via a saturation-aware background sweeper. Purely cosmetic/read-only — it never clicks a buy control, submits a form, or makes a network request.
 // @author       dataterminals
 // @homepageURL  https://github.com/dataterminals/AmazonTweaks
 // @supportURL   https://github.com/dataterminals/AmazonTweaks/issues
@@ -23,10 +23,14 @@
 //     <html>. It never reads credentials, never issues a network request, and never operates
 //     a money-moving control. Keep it that way — anything that touches account state belongs
 //     in a different, clearly-scoped tool.
-//   * Dark mode is CSS-only, scoped under `html.amz-tw-dark`. Because it is pure CSS, it applies
-//     automatically to nodes Amazon injects later (search filtering, lazy sections) — no
-//     MutationObserver needed. Toggling the theme is just flipping the class; instant, no reflow
-//     of our own doing.
+//   * Dark mode is scoped under `html.amz-tw-dark`, so toggling the theme is just flipping that
+//     one class (instant). It is TWO layers: (1) a static stylesheet for structure/text/links/
+//     accents and the common surfaces, which needs no MutationObserver because it is pure CSS; and
+//     (2) a JS "background sweeper" for everything the stylesheet can't name by selector. Amazon's
+//     newer pages (Buy Again, Orders, lists) are React apps whose card classes carry a per-deploy
+//     hash (e.g. `_YnV5L_gridCell_1hj4x`), so there is no stable selector to target — the sweeper
+//     instead finds any opaque, near-greyscale LIGHT background and darkens it, while leaving
+//     saturated colours (promo banners, sale badges), the CTAs and the search bar alone.
 //   * The theme runs at @run-at document-start and adds the class to document.documentElement
 //     immediately, so the page paints dark from the first frame (no white flash / FOUC).
 //   * Strategy for the CSS: set the page background + text on <html>/<body>, collapse Amazon's
@@ -359,6 +363,37 @@ html.amz-tw-dark #navBackToTop .navFooterBackToTopText {
   color: var(--ae-text) !important;
 }
 
+/* ===== modern / dynamic surfaces (no-flash helpers) =====
+   Amazon's newer pages (Buy Again, Orders, ...) are React apps whose card class
+   names are per-deploy hashes (e.g. _YnV5L_gridCell_1hj4x), so we match by
+   substring. These are the common large surfaces, painted instantly to avoid a
+   flash; the JS sweeper is the general catch-all for everything else. */
+html.amz-tw-dark [class*="gridCell"],
+html.amz-tw-dark [class*="miniAisleTile"],
+html.amz-tw-dark #ride-side-sheet,
+html.amz-tw-dark .nav-flyout:not(#nav-flyout-searchAjax),
+html.amz-tw-dark .nav-flyout:not(#nav-flyout-searchAjax) .nav-flyout-body,
+html.amz-tw-dark #ewc-compact-body,
+html.amz-tw-dark .ewc-compact-head {
+  background-color: var(--ae-surface) !important;
+  border-color: var(--ae-border) !important;
+  color: var(--ae-text) !important;
+}
+html.amz-tw-dark [class*="gridElement"] { background-color: transparent !important; }
+
+/* Surfaces the JS sweeper flags: it tags any opaque, near-greyscale LIGHT
+   background with one of these attributes. Scoped under the theme class, so
+   toggling the theme off drops the effect automatically (the attributes stay
+   on the elements, harmlessly inert, until the theme is turned back on). */
+html.amz-tw-dark [data-amztw="1"] {
+  background-color: var(--ae-surface) !important;
+  border-color: var(--ae-border) !important;
+}
+html.amz-tw-dark [data-amztw="2"] {
+  background-color: var(--ae-surface-2) !important;
+  border-color: var(--ae-border) !important;
+}
+
 /* ===== scrollbars ===== */
 html.amz-tw-dark ::-webkit-scrollbar { width: 12px; height: 12px; }
 html.amz-tw-dark ::-webkit-scrollbar-track { background: var(--ae-bg-2); }
@@ -389,6 +424,7 @@ html.amz-tw-dark ::-webkit-scrollbar-thumb:hover { background: #5b6773; }
     prefs.darkMode = !!on;
     savePrefs(prefs);
     applyDark(prefs.darkMode);
+    if (prefs.darkMode) startSweeper(); // catch anything not yet tagged
     refreshMenu();
   }
 
@@ -428,6 +464,95 @@ html.amz-tw-dark ::-webkit-scrollbar-thumb:hover { background: #5b6773; }
     },
     true
   );
+
+  // ---------------------------------------------------------------------------
+  // Background sweeper (the general catch-all — see DESIGN NOTES at the top).
+  //
+  // Walks the DOM and darkens any element whose background is an OPAQUE,
+  // NEAR-GREYSCALE, LIGHT colour. Leaves saturated colours (promo banners, sale
+  // badges), the yellow/orange CTAs and the search bar untouched. Backgrounds
+  // only — text is already handled by the class-based rules above (the modern
+  // cards use standard .a-color-* / .a-price-* classes, so they read fine once
+  // the surface is dark). Runs an initial full pass, then watches for lazily
+  // added / re-rendered nodes with a debounced MutationObserver.
+  // ---------------------------------------------------------------------------
+  const SWEEP_SKIP_TAGS = new Set([
+    'IMG', 'SVG', 'VIDEO', 'CANVAS', 'IFRAME', 'INPUT', 'TEXTAREA', 'SELECT',
+    'OPTION', 'PATH', 'G', 'USE', 'PICTURE', 'SOURCE', 'LINE', 'POLYGON',
+    'CIRCLE', 'RECT', 'DEFS', 'MASK'
+  ]);
+
+  function parseRGB(s) {
+    const m = /rgba?\(([^)]+)\)/.exec(s || '');
+    if (!m) return null;
+    const p = m[1].split(',').map(function (x) { return parseFloat(x); });
+    return { r: p[0], g: p[1], b: p[2], a: p[3] === undefined ? 1 : p[3] };
+  }
+  function luma(c) { return (0.299 * c.r + 0.587 * c.g + 0.114 * c.b) / 255; }
+  function chroma(c) { return Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b); }
+
+  function sweepEl(el) {
+    if (!el || el.nodeType !== 1 || el.hasAttribute('data-amztw')) return;
+    if (SWEEP_SKIP_TAGS.has(el.tagName)) return;
+    const cls = typeof el.className === 'string' ? el.className : '';
+    if (/a-button-(primary|cart|buynow|oyi)|accent/i.test(cls)) return; // keep CTA colours
+    if (el.closest('#nav-search, #nav-flyout-searchAjax')) return;       // keep the search bar light
+    let cs;
+    try { cs = getComputedStyle(el); } catch (e) { return; }
+    if (cs.backgroundImage && cs.backgroundImage !== 'none') return;     // a sprite/photo owns this bg
+    const bg = parseRGB(cs.backgroundColor);
+    if (!bg || bg.a < 0.9) return;                                       // transparent / translucent
+    const L = luma(bg);
+    if (L < 0.72 || chroma(bg) > 28) return;                             // not a neutral-light surface
+    el.setAttribute('data-amztw', L >= 0.88 ? '1' : '2');               // white-ish vs light-grey
+  }
+
+  function sweepTree(root) {
+    if (!root || root.nodeType !== 1) return;
+    try {
+      sweepEl(root);
+      const kids = root.querySelectorAll('*');
+      for (let i = 0; i < kids.length; i++) sweepEl(kids[i]);
+    } catch (e) { /* never let a sweep throw into the page */ }
+  }
+
+  // Coalesce bursts of mutations into one idle pass.
+  let sweepPending = [];
+  let sweepScheduled = false;
+  function flushSweep() {
+    sweepScheduled = false;
+    const nodes = sweepPending;
+    sweepPending = [];
+    for (let i = 0; i < nodes.length; i++) sweepTree(nodes[i]);
+  }
+  function scheduleSweep() {
+    if (sweepScheduled) return;
+    sweepScheduled = true;
+    if (window.requestIdleCallback) requestIdleCallback(flushSweep, { timeout: 400 });
+    else setTimeout(flushSweep, 150);
+  }
+
+  let sweepObserver = null;
+  function startSweeper() {
+    if (!prefs.darkMode || !document.body) return;
+    sweepTree(document.body); // initial full pass
+    if (sweepObserver) return; // already watching
+    sweepObserver = new MutationObserver(function (muts) {
+      for (let i = 0; i < muts.length; i++) {
+        const added = muts[i].addedNodes;
+        for (let j = 0; j < added.length; j++) {
+          if (added[j].nodeType === 1) sweepPending.push(added[j]);
+        }
+      }
+      if (sweepPending.length) scheduleSweep();
+    });
+    sweepObserver.observe(document.body, { childList: true, subtree: true });
+  }
+
+  if (prefs.darkMode) {
+    if (document.body) startSweeper();
+    else document.addEventListener('DOMContentLoaded', startSweeper, { once: true });
+  }
 
   // ---------------------------------------------------------------------------
   // Feature seam (future work).
